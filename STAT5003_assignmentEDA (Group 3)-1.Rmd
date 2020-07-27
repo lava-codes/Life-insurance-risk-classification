@@ -1,0 +1,529 @@
+---
+title: "STAT5003_assignmentEDA"
+author: '490462137 (rmen0735),490617999 (lagr7305),490537365 (mgup6878),490609961 (grad0149)'
+date: "20/10/2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Importing Required libraries
+```{r 0}
+library(dplyr)
+library(caret)
+library(reshape2)
+library(ggplot2)
+library(RColorBrewer)
+library(plyr)
+library(gridGraphics)
+library(grid)
+library(gridExtra)
+library(visdat)
+library(corrplot)
+library(devtools)
+library(randomForest)
+library(xgboost)
+library(multiROC)
+library(dummies)
+require(ggplot2)
+```
+
+#Reading the CSV file
+```{r 01}
+df <- read.csv(file="C:/Users/lenovo/Documents/USyd courses/computational statistics/assignment2/train.csv", header=TRUE, sep=",",colClasses = c("Response"="factor"))
+```
+#Data cleaning
+```{r}
+
+#Reducing level of response variable
+df$Response <- mapvalues(df$Response, 
+                         from=c(1,2,3,4,5,6,7,8), 
+                         to=c(1,1,2,2,3,3,4,4))
+
+#Missing value treatment
+
+df <- df[, -which(colMeans(is.na(df)) > 0.7)] #removing columns/features that have more than 70% of their values missing.
+nan_cols = colnames(df)[colSums(is.na(df)) > 0]
+for(i in nan_cols){
+  df[is.na(df[,i]), i] <- mean(df[,i], na.rm = TRUE) #replacing NAs by the mean of the remaining values of the respective columns.
+}
+
+# Train and test data split
+inTrain <- createDataPartition(df[,123], p = 0.75)[[1]]
+train <- df[inTrain,] # train data split to 75% percent of data
+test <- df[-inTrain,] # test data split to 25% percent of data
+
+
+# Feature Engineering
+med_key_col <- colnames(train[c(75:122)]) # extracting the medical keyword 1 to 48 binary value features
+train$med_key_count <- apply(train[, med_key_col], 1, function(x) sum(x)) # Sum of medical keyword associated with
+test$med_key_count <- apply(test[, med_key_col], 1, function(x) sum(x))   # the customer
+
+```
+
+#Exploratory Data Analysis visualization
+```{r plot0, echo=FALSE}
+# Missing value visualisation
+nan_cols = colnames(df)[colSums(is.na(df)) > 0]
+vis_miss(df[,nan_cols])
+```
+**Features such as Medical_History_10 (99% missing values) and Medical_History_24 (90% missing values) will be be disregarded for further analysis. Missing values in other columns will be imputed with the respective means.**
+```{r 1}
+
+#Reducing level of response variable
+
+plot_after_trans <- ggplot(df, aes(factor(Response), fill = factor(Response))) + geom_bar() + 
+  ggtitle("Response Variable after mapping")
+```
+```{r plot1, echo=FALSE}
+grid.arrange(plot_before_trans, plot_after_trans, ncol=2)
+```
+
+```{r 2}
+nums <- unlist(lapply(df, is.numeric))
+corr<- cor(df[,nums])
+df_corr <- as.data.frame(corr)
+df_corr <- df_corr[,c('Id','Response')]
+df_corr$Response <- abs(df_corr$Response)
+top_10_corr_cols <- rownames(df_corr[order(df_corr$Response, decreasing = TRUE),])[1:11]
+cordata <- round(cor(df[,top_10_corr_cols]),2)
+melt_corr <- melt(cordata)
+```
+**Correlation of features with response variable and among themselves. Notice the negative correlation of weight and BMI with the response variable.**
+```{r plot2, echo=FALSE}
+ggplot(data = melt_corr, aes(x=Var1, y=Var2, fill=value, label= value))+ geom_tile() + 
+  scale_fill_gradient2(low = "#132B43",high ="#56B1F7",mid = "white") + geom_text() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1)) +
+  ggtitle("Top 10 correlated features (excluding response variable)")
+plot_bmi_1 <- ggplot(df, aes(x = BMI)) + geom_density(aes(fill = factor(Response),color = factor(Response)), alpha = 0.6)
+plot_bmi_2 <- ggplot(df, aes(x = factor(Response), y = BMI, fill = factor(Response))) + geom_boxplot() 
+grid.arrange(plot_bmi_1, plot_bmi_2, ncol=2)
+```
+**The box plot shows that level 1 clients have a higher standard deviation and generally have high BMI (median), especially compared to level 2and 4 clients. Level 3 is an anomaly.**
+```{r}
+df$bm <- df$Wt/(df$Ht^2)
+ggplot(df, aes(x=bm, y=BMI, color=factor(Response))) + geom_point()+ geom_smooth(method=lm,se=FALSE, fullrange=TRUE)+ labs(title="BMI (observed vs. derived (metric system))",x="Weight/(Height^2)", y = "BMI (given)") +  xlim(0,1) + theme_classic()
+```
+**Note that weight is strongly correlated with BMI (0.85). This is reflected in the graph where x-axis represents the calulated BMI (metric system) and y-axis represents the observed values. There is an almost steady linear relationship between them, further supporting the correlation between height, weight and BMI.**
+```{r}
+
+df1 <- df[, c(13:18,123)] 
+par(mfrow = c(2,2))
+p1 <- corrplot(cor(df1), type = "upper", order = "hclust", tl.col = "black", tl.srt = 45)
+df4 <- df[, c(34:37,123)] 
+p4 <- corrplot(cor(df4), type = "upper", order = "hclust", tl.col = "black", tl.srt = 45)
+df2 <- df[, c(19:25,123)]
+p2 <- corrplot(cor(df2), type = "upper", order = "hclust", tl.col = "black", tl.srt = 45)
+df3 <- df[, c(26:33,123)]  
+p3 <- corrplot(cor(df3), type = "upper", order = "hclust", tl.col = "black", tl.srt = 45)
+```
+**Insurance history factors share a mild correlation with each other (For instance, insurance history 3 is related to four other insurance_history factors). This could be useful at a later stage when dimensionality reduction using PCA is required. Employment_info factors share weaker relationships among themselves and with the Response variable.** 
+
+
+```{r}
+df11 <- df[df$Response == 1,]
+ggplot(df11, aes(x = Ins_Age, y = BMI)) + geom_point() + stat_density_2d(aes(fill = ..level..),geom="polygon") + xlab("Normalised age")
+```
+**The first density plot (above) is associated with high risk clients (level 1). It can be seen that there is more variance in the distribution, especially with younger people (normalised age < 0.50) being more prone to have unhealthy BMIs.Hence, they belong to level 1(high risk). Please note that lighter shades indicate higher density**
+```{r}
+df12 <- df[df$Response == 2,]
+ggplot(df12, aes(x = Ins_Age, y = BMI)) + geom_point() + stat_density_2d(aes(fill = ..level..),geom="polygon") + xlab("Normalised age")
+```
+**The second density plot (above) is associated with level 2. Compared to the first plot, younger people have healthier BMIs, with more randomness among older generation.**
+```{r}
+df13 <- df[df$Response == 3,]
+ggplot(df13, aes(x = Ins_Age, y = BMI)) + geom_point() + stat_density_2d(aes(fill = ..level..),geom="polygon") + xlab("Normalised age")
+```
+**Although this graph spans a wider area (possibly due to more clients belonging to level 3),most of the BMIs for all age groups are centered around 0.5, corresponding to less risk compared to levels 1 and 2.**
+```{r}
+df14 <- df[df$Response == 4,]
+ggplot(df14, aes(x = Ins_Age, y = BMI)) + geom_point() + stat_density_2d(aes(fill = ..level..),geom="polygon") + xlab("Normalised age")
+```
+**This last density plot (above) is associated with low risk clients (level 4). For all ages, the BMI is closer to 0.5 compared to the above plots. It is also worth noting that most of these clients fall between 0.5 and 0.25, and hence the least variance, despite having the highest number of clients belonging to this level (4).**
+```{r}
+ggplot(df, aes(Ins_Age,fill=factor(Response))) + geom_bar(position="fill") + labs(title = "Distribution of Response classes with respect to Age", x = "Normalised age", y = "Frequency")
+```
+**The bar graph intuitively follows the logic that younger clients would be more likely to be classified as low risk clients (level 4) and middle-aged and the elderly would be classified as riskier clients (level 1).**
+
+```{r}
+prin_comp <- prcomp(df[,c(4:122,2)], center = TRUE, scale = TRUE)
+std_dev <- prin_comp$sdev
+pr_var <- std_dev^2
+prop_varex <- pr_var/sum(pr_var)
+plot(prop_varex, xlab = "Principal Component",ylab = "Proportion of Variance Explained",type = "b")
+plot(cumsum(prop_varex), xlab = "Principal Component",ylab = "Cumulative Proportion of Variance Explained",type = "b")
+```
+**The first plot above shows that ~ 100 components explains around 97% variance in the data set. In order words, using PCA we have reduced 120 predictors to 100 without compromising on explained variance. This is confirmed by the  cumulative variance plot.**
+
+```{r}
+#Logistic regression
+model <- nnet::multinom(Response ~., data = train[,-c(1,3)],trControl=train_control)
+predicted.classes <- predict(model,test)
+confusionMatrix(predicted.classes,test$Response)
+```
+```{r}
+# predicting the probability of the multiclasses to plot the AUC-ROC curve
+log_pred <- predict(model, test[,-c(1,3)], type = 'prob') 
+log_pred <- data.frame(log_pred)
+colnames(log_pred) <- paste(colnames(log_pred), "_pred_log")
+```
+
+
+
+```{r}
+# plotting AUC-ROC curve for logistic regression
+
+# Renaming the columns according to the input requred for the multiroc package function
+# to plot the AUC-ROC curve
+colnames(log_pred)[1] <- "1 _pred_log"
+colnames(log_pred)[2] <- "2 _pred_log"
+colnames(log_pred)[3] <- "3 _pred_log"
+colnames(log_pred)[4] <- "4 _pred_log"
+
+# creating a dataframe containing the actual response
+# and the predicted response to generate ROC curve
+true_label <- dummies::dummy(test$Response, sep = ".")
+true_label <- data.frame(true_label)
+colnames(true_label) <- gsub(".*?\\.", "", colnames(true_label))
+colnames(true_label) <- paste(colnames(true_label), "_true")
+final_df1 <- cbind(true_label, log_pred)
+
+# Made use of MultiRoc package to plot the curve
+roc_res_log <- multi_roc(final_df1, force_diag=T)
+pr_res_log <- multi_pr(final_df1, force_diag=T)
+
+plot_roc_df <- plot_roc_data(roc_res_log)
+plot_pr_df <- plot_pr_data(pr_res_log)
+
+ggplot(plot_roc_df, aes(x = 1-Specificity, y=Sensitivity)) +
+  geom_path(aes(color = Group, linetype=Method), size=1.5) +
+  geom_segment(aes(x = 0, y = 0, xend = 1, yend = 1), 
+                        colour='grey', linetype = 'dotdash') +
+  theme_bw() + 
+  theme(plot.title = element_text(hjust = 0.5), 
+                 legend.justification=c(1, 0), legend.position=c(.95, .05),
+                 legend.title=element_blank(), 
+                 legend.background = element_rect(fill=NULL, size=0.5, 
+                                                           linetype="solid", colour ="black"))
+ggplot(plot_pr_df, aes(x=Recall, y=Precision)) + 
+  geom_path(aes(color = Group, linetype=Method), size=1.5) + 
+  theme_bw() + 
+  theme(plot.title = element_text(hjust = 0.5), 
+                 legend.justification=c(1, 0), legend.position=c(.95, .05),
+                 legend.title=element_blank(), 
+                 legend.background = element_rect(fill=NULL, size=0.5, 
+                                                           linetype="solid", colour ="black"))
+```
+
+```{r}
+cm <- as.matrix(confusionMatrix(predicted.classes,test$Response))
+ n = sum(cm) # number of instances
+ nc = nrow(cm) # number of classes
+ diag = diag(cm) # number of correctly classified instances per class 
+ rowsums = apply(cm, 1, sum) # number of instances per class
+ colsums = apply(cm, 2, sum) # number of predictions per class
+ p = rowsums / n # distribution of instances over the actual classes
+ q = colsums / n # distribution of instances over the predicted classes
+accuracy = sum(diag) / n
+accuracy
+
+```
+
+
+```{r}
+# LDA Classifier
+lda <- train(Response~.,
+                     data = train[,-c(1,3)],
+                     method = "lda",
+                     trControl = trainControl(method = "repeatedcv", 
+                                              repeats = 5))
+lda.classes <- predict(lda,test[,-c(1,3)])
+confusionMatrix(lda.classes,test$Response)
+```
+
+```{r}
+# # plotting AUC-ROC curve for LDA with MultiRoc package stucture
+lda_pred <- predict(lda, test[,-c(1,3)], type = 'prob') 
+lda_pred <- data.frame(lda_pred)
+colnames(lda_pred) <- paste(colnames(lda_pred), "_pred_lda")
+
+# Renaming the columns according to the input requred for the multiroc package function
+# to plot the AUC-ROC curve
+colnames(lda_pred)[1] <- "1 _pred_lda"
+colnames(lda_pred)[2] <- "2 _pred_lda"
+colnames(lda_pred)[3] <- "3 _pred_lda"
+colnames(lda_pred)[4] <- "4 _pred_lda"
+
+# creating a dataframe containing the actual response
+# and the predicted response to generate ROC curve
+true_label <- dummies::dummy(test$Response, sep = ".")
+true_label <- data.frame(true_label)
+colnames(true_label) <- gsub(".*?\\.", "", colnames(true_label))
+colnames(true_label) <- paste(colnames(true_label), "_true")
+final_df1 <- cbind(true_label, lda_pred)
+
+# Made use of MultiRoc package to plot the curve
+roc_res_lda <- multi_roc(final_df1, force_diag=T)
+pr_res_lda <- multi_pr(final_df1, force_diag=T)
+
+plot_roc_df <- plot_roc_data(roc_res_lda)
+plot_pr_df <- plot_pr_data(pr_res_lda)
+
+ggplot(plot_roc_df, aes(x = 1-Specificity, y=Sensitivity)) +
+  geom_path(aes(color = Group, linetype=Method), size=1.5) +
+  geom_segment(aes(x = 0, y = 0, xend = 1, yend = 1), 
+                        colour='grey', linetype = 'dotdash') +
+  theme_bw() + 
+  theme(plot.title = element_text(hjust = 0.5), 
+                 legend.justification=c(1, 0), legend.position=c(.95, .05),
+                 legend.title=element_blank(), 
+                 legend.background = element_rect(fill=NULL, size=0.5, 
+                                                           linetype="solid", colour ="black"))
+ggplot(plot_pr_df, aes(x=Recall, y=Precision)) + 
+  geom_path(aes(color = Group, linetype=Method), size=1.5) + 
+  theme_bw() + 
+  theme(plot.title = element_text(hjust = 0.5), 
+                 legend.justification=c(1, 0), legend.position=c(.95, .05),
+                 legend.title=element_blank(), 
+                 legend.background = element_rect(fill=NULL, size=0.5, 
+                                                           linetype="solid", colour ="black"))
+```
+
+```{r}
+head(train)
+# Hyper parameter tuning for random forest classifier
+tunegrid <- expand.grid(.ntrees=c(5,10,15,20), .maxnodes=c(5,10,15,20), .mtry=c(1:11))
+tr <- c(5,10,15)
+nd <- c(5,10,15,20)
+#Random forest model
+rf.model <- randomForest(Response~., data = train[,-c(1,3)], tuneGrid=tunegrid) 
+
+rf.test <- predict(rf.model, test, type="class")
+confusionMatrix(rf.test,test$Response)
+```
+```{r}
+rf_pred <- predict(rf.model, test[,-c(1,3)], type = 'prob') 
+rf_pred <- data.frame(rf_pred)
+colnames(rf_pred) <- paste(colnames(rf_pred), "_pred_rf")
+
+colnames(rf_pred)[1] <- "1 _pred_rf"
+colnames(rf_pred)[2] <- "2 _pred_rf"
+colnames(rf_pred)[3] <- "3 _pred_rf"
+colnames(rf_pred)[4] <- "4 _pred_rf"
+
+# Plotting AUC-ROC curve for Random Forest
+true_label <- dummies::dummy(test$Response, sep = ".")
+true_label <- data.frame(true_label)
+colnames(true_label) <- gsub(".*?\\.", "", colnames(true_label))
+colnames(true_label) <- paste(colnames(true_label), "_true")
+final_df1 <- cbind(true_label, rf_pred)
+
+roc_res_rf <- multi_roc(final_df1, force_diag=T)
+pr_res_rf <- multi_pr(final_df1, force_diag=T)
+
+plot_roc_df <- plot_roc_data(roc_res_rf)
+plot_pr_df <- plot_pr_data(pr_res_rf)
+ggplot(plot_roc_df, aes(x = 1-Specificity, y=Sensitivity)) +
+  geom_path(aes(color = Group, linetype=Method), size=1.5) +
+  geom_segment(aes(x = 0, y = 0, xend = 1, yend = 1), 
+                        colour='grey', linetype = 'dotdash') +
+  theme_bw() + 
+  theme(plot.title = element_text(hjust = 0.5), 
+                 legend.justification=c(1, 0), legend.position=c(.95, .05),
+                 legend.title=element_blank(), 
+                 legend.background = element_rect(fill=NULL, size=0.5, 
+                                                           linetype="solid", colour ="black"))
+ggplot(plot_pr_df, aes(x=Recall, y=Precision)) + 
+  geom_path(aes(color = Group, linetype=Method), size=1.5) + 
+  theme_bw() + 
+  theme(plot.title = element_text(hjust = 0.5), 
+                 legend.justification=c(1, 0), legend.position=c(.95, .05),
+                 legend.title=element_blank(), 
+                 legend.background = element_rect(fill=NULL, size=0.5, 
+                                                           linetype="solid", colour ="black"))
+```
+
+
+```{r}
+#XGBoost and hyper-parameter tuning
+tunegrid1 <- expand.grid(.nrounds=c(300,500,1000), .eta=c(0.4,0.6,0.8,1))
+xgb.model <- xgboost(data = as.matrix(train[,-c(1,3,123)]), label = train[,123],nrounds=1000, tuneGrid=tunegrid1, nthread=2, max_depth = 2, verbose=FALSE,objective="multi:softmax", num_class = 5, trControl = train_control)  
+xgb.test <- predict(xgb.model, newdata = as.matrix(test[,-c(1,3,123)]))
+confusionMatrix(table(xgb.test,test$Response)) 
+
+```
+
+
+```{r}
+# AUC-ROC plot for Xgboost
+response = df$Response
+label = as.integer(test$Response)-1
+test$Response = NULL
+test.label = label[-inTrain]
+xgb.train = xgb.DMatrix(data=as.matrix(train[,-c(1,3,123)]),label=train[,123])
+
+
+num_class = 3
+params = list(
+  booster="gbtree",
+  eta=0.001,
+  max_depth=5,
+  gamma=3,
+  subsample=0.75,
+  colsample_bytree=1,
+  objective="multi:softprob",
+  eval_metric="mlogloss",
+  num_class=num_class
+)
+
+xgb.fit=xgb.train(
+  params=params,
+  data=xgb.train,
+  nrounds=1000,
+  nthreads=1,
+  verbose=0
+)
+
+xgb.pred = predict(xgb.model,as.matrix(test[,-c(1,3,123)]),reshape=T)
+xgb.pred = as.data.frame(xgb.pred)
+colnames(xgb.pred) = levels(response)
+
+xgb.pred$prediction = apply(xgb.pred,1,function(x) colnames(xgb.pred)[which.max(x)])
+xgb.pred$label = levels(response)[test.label+1]
+```
+
+
+```{r}
+xgb_pred <- xgb.pred[c(1,2,3,4)]
+colnames(xgb_pred)[1] <- "1 _pred_xgb"
+colnames(xgb_pred)[2] <- "2 _pred_xgb"
+colnames(xgb_pred)[3] <- "3 _pred_xgb"
+colnames(xgb_pred)[4] <- "4 _pred_xgb"
+
+library(multiROC)
+library(dummies)
+true_label <- dummies::dummy(test$Response, sep = ".")
+true_label <- data.frame(true_label)
+colnames(true_label) <- gsub(".*?\\.", "", colnames(true_label))
+colnames(true_label) <- paste(colnames(true_label), "_true")
+final_df1 <- cbind(true_label, xgb_pred)
+
+roc_res <- multi_roc(final_df1, force_diag=T)
+pr_res <- multi_pr(final_df1, force_diag=T)
+
+plot_roc_df <- plot_roc_data(roc_res)
+plot_pr_df <- plot_pr_data(pr_res)
+
+require(ggplot2)
+ggplot(plot_roc_df, aes(x = 1-Specificity, y=Sensitivity)) +
+  geom_path(aes(color = Group, linetype=Method), size=1.5) +
+  geom_segment(aes(x = 0, y = 0, xend = 1, yend = 1), 
+                        colour='grey', linetype = 'dotdash') +
+  theme_bw() + 
+  theme(plot.title = element_text(hjust = 0.5), 
+                 legend.justification=c(1, 0), legend.position=c(.95, .05),
+                 legend.title=element_blank(), 
+                 legend.background = element_rect(fill=NULL, size=0.5, 
+                                                           linetype="solid", colour ="black"))
+ggplot(plot_pr_df, aes(x=Recall, y=Precision)) + 
+  geom_path(aes(color = Group, linetype=Method), size=1.5) + 
+  theme_bw() + 
+  theme(plot.title = element_text(hjust = 0.5), 
+                 legend.justification=c(1, 0), legend.position=c(.95, .05),
+                 legend.title=element_blank(), 
+                 legend.background = element_rect(fill=NULL, size=0.5, 
+                                                           linetype="solid", colour ="black"))
+```
+
+```{r}
+# To plot the feature importance of xgboost classifier
+mat <- xgb.importance (feature_names = colnames(df),model = xgb.model)
+xgb.plot.importance (importance_matrix = mat[1:10])
+```
+
+
+
+```{r}
+
+
+
+## Considering all the categorical variables in place, if we have dropped that categorical variable, no need of this
+
+y_response <- df$Response
+dim(df)
+dmy <- dummyVars(" ~ .", data = df[,-123])
+df <- data.frame(predict(dmy, newdata = df[-123]))
+dim(df)
+df$Response <- y_response
+
+
+
+
+
+## If categorical variable not there, and no. of features to be consumed is 122, no need to add this, 
+##   We will directly use inTrain
+inTrain <- createDataPartition(df[,141], p = 0.75)[[1]]
+train <- df[inTrain,]
+test <- df[-inTrain,]
+
+### Commented by Manisha -- Please provide the column indexes as per latest df if dummify done
+### LASSO Implemented after Random Forest
+
+
+#med_key_col <- colnames(train[c(75:140)])
+#train$med_key_count <- apply(train[, med_key_col], 1, function(x) sum(x))
+#test$med_key_count <- apply(test[, med_key_col], 1, function(x) sum(x))
+
+
+
+### LASSO Feature Selection -- Added by Manisha 
+
+library(glmnet)
+# create learning matrix X and regression response variable Y
+response_index = as.numeric(grep('Response', colnames(train)))
+response_index
+
+x <- model.matrix(df$Response ~ ., df)[,-1]
+y <- as.numeric(df$Response)
+
+## Lasso model
+grid <- 10^seq(8,-2, length=100)
+lasso.mod <- glmnet(x[inTrain,], y[inTrain], alpha=1, lambda=grid)
+
+set.seed (1)
+# Using cross-validation for Lasso to find the best lambda (based on cvm "mean cross-validated error")
+cv.lasso <- cv.glmnet (x[inTrain,], y[inTrain], alpha=1)
+plot(cv.lasso)
+bestlam <- cv.lasso$lambda.min 
+# Lasso for feature selection
+lasso.coef=predict(lasso.mod, type="coefficients", s=bestlam)
+
+str(lasso.coef)
+#features_selected
+
+df_selected <- df[, -which(lasso.coef[,1] == 0 )]
+df_selected$Response = df$Response
+length(colnames(df_selected))
+respon_index = as.numeric(grep('Response', colnames(df_selected)))
+lasso.coef
+
+### Added this section as we needed to split the new dataset 'df_selected' to training and test sets
+
+## Can be ignored if not using lasso
+## No need to change in model code
+
+#class(df_selected$Response)
+set.seed(1)
+inTrain <- createDataPartition(df_selected[,74], p = 0.75)[[1]]
+train <- df[inTrain,]
+test <- df[-inTrain,]
+
+
+#Logistic regression
+model <- nnet::multinom(Response ~., data = train,trControl=train_control)
+predicted.classes <- predict(model,test)
+confusionMatrix(predicted.classes,test$Response)
+```
+Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
